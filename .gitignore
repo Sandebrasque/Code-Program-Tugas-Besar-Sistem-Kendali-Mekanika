@@ -1,40 +1,200 @@
-# Prerequisites
-*.d
+#include <Arduino.h>
 
-# Compiled Object files
-*.slo
-*.lo
-*.o
-*.obj
+// ==========================================
+// 1. KONFIGURASI PIN
+// ==========================================
+#define PWM_PIN     PA6   // Driver ENA
+#define IN1_PIN     PA1   // Driver IN1
+#define IN2_PIN     PA2   // Driver IN2
+#define BTN_PIN     PA0   // Tombol On/Off
+#define TRIG_PIN    PA8   // Ultrasonik Trig
+#define ECHO_PIN    PA9   // Ultrasonik Echo
+#define RPM_PIN     PA3   // Sensor RPM (Wajib Interrupt)
 
-# Precompiled Headers
-*.gch
-*.pch
+// ==========================================
+// 2. KONFIGURASI TARGET RPM (SETPOINT)
+// ==========================================
+// Kita memetakan Jarak (cm) menjadi Target RPM
+#define DIST_CLOSE  10.0  
+#define RPM_MAX     2000  
 
-# Linker files
-*.ilk
+#define DIST_FAR    30.0  
+#define RPM_MIN     1000   
 
-# Debugger Files
-*.pdb
+// Batas PWM Hardware
+#define PWM_LIMIT_MIN 0
+#define PWM_LIMIT_MAX 255
 
-# Compiled Dynamic libraries
-*.so
-*.dylib
-*.dll
+// ==========================================
+// 3. TUNING PID KECEPATAN
+// ==========================================
+// PID sekarang mengoreksi error RPM (bukan error jarak)
+// Kp: Seberapa agresif mengejar RPM (misal error 100 RPM, tambah PWM berapa?)
+// float Kp = 20.00;   // Nilai kecil karena Error RPM ribuan (misal 3000), tapi PWM cuma 0-255
+// float Ki = 2.00;   // Agar RPM pas di angka target (menghilangkan steady state error)
+// float Kd = 1.00;   // Meredam lonjakan
 
-# Fortran module files
-*.mod
-*.smod
+float Kp = 20.00;   // Nilai kecil karena Error RPM ribuan (misal 3000), tapi PWM cuma 0-255
+float Ki = 2.00;   // Agar RPM pas di angka target (menghilangkan steady state error)
+float Kd = 1.00;   // Meredam lonjakan
 
-# Compiled Static libraries
-*.lai
-*.la
-*.a
-*.lib
+// Variabel PID
+float error = 0, lastError = 0, integral = 0;
+float currentPWM = 0; // PWM sekarang (Floating point biar presisi)
 
-# Executables
-*.exe
-*.out
+// ==========================================
+// 4. VARIABEL RPM
+// ==========================================
+#define JUMLAH_BALING 4
+volatile unsigned long pulseCount = 0;
+unsigned long lastTime = 0;
+float currentRPM = 0;
+float targetRPM = 0;
+
+// System State
+bool systemActive = false;
+bool lastButtonState = HIGH;
+
+// ISR Hitung Pulsa
+void countRPM() {
+  pulseCount++;
+}
+
+void setup() {
+  Serial.begin(115200);
+
+  pinMode(PWM_PIN, OUTPUT);
+  pinMode(IN1_PIN, OUTPUT);
+  pinMode(IN2_PIN, OUTPUT);
+  pinMode(BTN_PIN, INPUT_PULLUP);
+  pinMode(TRIG_PIN, OUTPUT);
+  pinMode(ECHO_PIN, INPUT);
+
+  // Setup Sensor RPM
+  pinMode(RPM_PIN, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(RPM_PIN), countRPM, FALLING);
+
+  // Arah Motor
+  digitalWrite(IN1_PIN, HIGH);
+  digitalWrite(IN2_PIN, LOW);
+  analogWrite(PWM_PIN, 0);
+}
+
+// Fungsi Baca Jarak
+float getDistance() {
+  digitalWrite(TRIG_PIN, LOW); delayMicroseconds(2);
+  digitalWrite(TRIG_PIN, HIGH); delayMicroseconds(10);
+  digitalWrite(TRIG_PIN, LOW);
+  long duration = pulseIn(ECHO_PIN, HIGH, 30000);
+  if (duration == 0) return 999.0;
+  return (float)duration * 0.034 / 2.0;
+}
+
+// Fungsi Hitung RPM (Sampling Cepat 100ms untuk Responsif)
+void updateRPM() {
+  unsigned long now = millis();
+  if (now - lastTime >= 100) { // Update tiap 0.1 detik
+    detachInterrupt(digitalPinToInterrupt(RPM_PIN)); // Safety
+    
+    // Rumus: (Pulsa / Baling) * (60000ms / WaktuSampling)
+    currentRPM = ((float)pulseCount / JUMLAH_BALING) * 600.0;
+    
+    pulseCount = 0;
+    lastTime = now;
+    attachInterrupt(digitalPinToInterrupt(RPM_PIN), countRPM, FALLING);
+  }
+}
+
+// --- LOGIKA UTAMA: PID RPM ---
+void controlMotorSpeed() {
+  // 1. Hitung Error (Target RPM - RPM Asli)
+  error = targetRPM - currentRPM;
+
+  // 2. Integral (Akumulasi Error)
+  integral += error;
+  // Anti-Windup (Batasi integral agar PWM tidak meledak ke ribuan)
+  if (integral > 5000) integral = 5000;
+  if (integral < -5000) integral = -5000;
+
+  // 3. Derivative
+  float derivative = error - lastError;
+
+  // 4. Hitung Output PID
+  // Hasilnya adalah "Penambahan/Pengurangan" nilai PWM
+  float output = (Kp * error) + (Ki * integral) + (Kd * derivative);
+
+  // 5. Terapkan ke PWM saat ini
+  // Sifatnya inkremental: PWM baru = PWM lama + koreksi
+  // (Atau bisa juga Direct mapping jika tuning Kp pas)
+  // Di sini kita pakai Direct Mapping + Bias untuk simplifikasi tuning:
+  
+  // Kita tambahkan output ke currentPWM agar menyesuaikan
+  currentPWM += output;
+
+  // 6. Batasi PWM (Clamping)
+  if (currentPWM > PWM_LIMIT_MAX) currentPWM = PWM_LIMIT_MAX;
+  if (currentPWM < PWM_LIMIT_MIN) currentPWM = PWM_LIMIT_MIN;
+
+  // Jika Target RPM 0, paksa PWM 0 (Biar gak mendengung)
+  if (targetRPM == 0) {
+    currentPWM = 0;
+    integral = 0;
+  }
+
+  // Tulis ke Motor
+  analogWrite(PWM_PIN, (int)currentPWM);
+  
+  lastError = error;
+}
+
+void loop() {
+  // --- TOMBOL ---
+  bool btnState = digitalRead(BTN_PIN);
+  if (lastButtonState == HIGH && btnState == LOW) {
+    systemActive = !systemActive;
+    delay(200);
+    if (!systemActive) {
+      targetRPM = 0;
+      currentPWM = 0;
+      analogWrite(PWM_PIN, 0);
+    }
+  }
+  lastButtonState = btnState;
+
+  // Update Pembacaan RPM terus menerus
+  updateRPM();
+
+  if (systemActive) {
+    float dist = getDistance();
+
+    // --- MAPPING JARAK KE TARGET RPM ---
+    // 10cm -> 3000 RPM
+    // 30cm -> 1000 RPM
+    if (dist < DIST_CLOSE) {
+       targetRPM = RPM_MAX; // Mentok 3000
+    } else if (dist > DIST_FAR) {
+       targetRPM = 0;       // Mati jika jauh
+    } else {
+       // Rumus Map Float Linear Terbalik (Makin jauh makin pelan)
+       targetRPM = RPM_MAX - ((dist - DIST_CLOSE) * (RPM_MAX - RPM_MIN) / (DIST_FAR - DIST_CLOSE));
+    }
+
+    // Jalankan PID untuk mengejar TargetRPM
+    controlMotorSpeed();
+
+  } else {
+    analogWrite(PWM_PIN, 0);
+    targetRPM = 0;
+  }
+
+  // --- TELEPLOT ---
+  // Format visualisasi
+  Serial.print(">Target_RPM:"); Serial.println(targetRPM);
+  Serial.print(">Actual_RPM:"); Serial.println(currentRPM);
+  Serial.print(">PWM_Output:"); Serial.println(currentPWM);
+  
+  delay(50); // Loop delay
+}
 *.app
 
 # debug information files
