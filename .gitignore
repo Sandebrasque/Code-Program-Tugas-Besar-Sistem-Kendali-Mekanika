@@ -28,15 +28,9 @@
 // ==========================================
 // 3. TUNING PID KECEPATAN
 // ==========================================
-// PID sekarang mengoreksi error RPM (bukan error jarak)
-// Kp: Seberapa agresif mengejar RPM (misal error 100 RPM, tambah PWM berapa?)
-// float Kp = 20.00;   // Nilai kecil karena Error RPM ribuan (misal 3000), tapi PWM cuma 0-255
-// float Ki = 2.00;   // Agar RPM pas di angka target (menghilangkan steady state error)
-// float Kd = 1.00;   // Meredam lonjakan
-
-float Kp = 20.00;   // Nilai kecil karena Error RPM ribuan (misal 3000), tapi PWM cuma 0-255
-float Ki = 2.00;   // Agar RPM pas di angka target (menghilangkan steady state error)
-float Kd = 1.00;   // Meredam lonjakan
+float Kp = 20.00;  
+float Ki = 2.00;   
+float Kd = 1.00;   
 
 // Variabel PID
 float error = 0, lastError = 0, integral = 0;
@@ -90,7 +84,7 @@ float getDistance() {
   return (float)duration * 0.034 / 2.0;
 }
 
-// Fungsi Hitung RPM (Sampling Cepat 100ms untuk Responsif)
+// Fungsi Hitung RPM 
 void updateRPM() {
   unsigned long now = millis();
   if (now - lastTime >= 100) { // Update tiap 0.1 detik
@@ -112,7 +106,7 @@ void controlMotorSpeed() {
 
   // 2. Integral (Akumulasi Error)
   integral += error;
-  // Anti-Windup (Batasi integral agar PWM tidak meledak ke ribuan)
+  // Anti-Windup (atasi integral agar PWM tidak meledak ke ribuan
   if (integral > 5000) integral = 5000;
   if (integral < -5000) integral = -5000;
 
